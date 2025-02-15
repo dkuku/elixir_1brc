@@ -30,6 +30,7 @@ defmodule OneBRC.MeasurementsProcessor do
       "6" -> OneBRC.MeasurementsProcessor.Version6.process(count)
       "7" -> OneBRC.MeasurementsProcessor.Version7.process(count)
       "8" -> OneBRC.MeasurementsProcessor.Version8.process(count)
+      "9" -> OneBRC.MeasurementsProcessor.Version9.process(count)
       _ -> raise "Unknown version"
     end
   end
