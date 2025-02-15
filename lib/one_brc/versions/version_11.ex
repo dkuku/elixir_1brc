@@ -1,4 +1,10 @@
-defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
+defmodule OneBRC.MeasurementsProcessor.Version11.Worker do
+  @compile inline: [
+             parse_weather_station: 3,
+             parse_temp: 2,
+             parse_temp: 3,
+             process_row: 3
+           ]
   def run(parent_pid) do
     send(parent_pid, {:give_work, self()})
 
@@ -16,6 +22,10 @@ defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
     process_chunk_lines(bin)
   end
 
+  defp process_chunk_lines(<<?\n, rest::binary>>) do
+    process_chunk_lines(rest)
+  end
+
   defp process_chunk_lines(<<>>) do
     :ok
   end
@@ -24,8 +34,8 @@ defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
     parse_weather_station(bin, bin, 0)
   end
 
-  defp parse_weather_station(bin, <<";", _rest::binary>>, count) do
-    <<key::binary-size(count), ";", temp_bin::binary>> = bin
+  defp parse_weather_station(bin, <<?;, _rest::binary>>, count) do
+    <<key::binary-size(count), _, temp_bin::binary>> = bin
     parse_temp(temp_bin, String.to_atom(key))
   end
 
@@ -37,58 +47,49 @@ defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
     :ok
   end
 
-  # ex: -4.5
-  defp parse_temp(<<?-, d1, ?., d2, "\n", rest::binary>>, key) do
-    temp = -(char_to_num(d1) * 10 + char_to_num(d2))
-    process_row(key, temp)
-    process_chunk_lines(rest)
-  end
-
   # ex: 4.5
-  defp parse_temp(<<d1, ?., d2, "\n", rest::binary>>, key) do
-    temp = char_to_num(d1) * 10 + char_to_num(d2)
-    process_row(key, temp)
-    process_chunk_lines(rest)
+  defp parse_temp(<<?-, rest::binary>>, key) do
+    parse_temp(rest, key, -1)
   end
 
-  # ex: -45.3
-  defp parse_temp(<<?-, d1, d2, ?., d3, "\n", rest::binary>>, key) do
-    temp = -(char_to_num(d1) * 100 + char_to_num(d2) * 10 + char_to_num(d3))
-    process_row(key, temp)
+  defp parse_temp(rest, key) do
+    parse_temp(rest, key, 1)
+  end
+
+  defp parse_temp(<<_::4, d1::4, ?., _::4, d2::4, rest::binary>>, key, mult) do
+    temp = mult * (d1 * 10 + d2)
+    existing_record = :erlang.get(key)
+    process_row(key, existing_record, temp)
     process_chunk_lines(rest)
   end
 
   # ex: 45.3
-  defp parse_temp(<<d1, d2, ?., d3, "\n", rest::binary>>, key) do
-    temp = char_to_num(d1) * 100 + char_to_num(d2) * 10 + char_to_num(d3)
-    process_row(key, temp)
+  defp parse_temp(<<_::4, d1::4, _::4, d2::4, ?., _::4, d3::4, rest::binary>>, key, mult) do
+    temp = mult * (d1 * 100 + d2 * 10 + d3)
+    existing_record = :erlang.get(key)
+    process_row(key, existing_record, temp)
     process_chunk_lines(rest)
   end
 
-  defp process_row(key, val) do
-    existing_record = :erlang.get(key)
-
-    case existing_record do
-      :undefined ->
-        :erlang.put(key, {1, val, val, val})
-
-      {count, sum, min, max} ->
-        :erlang.put(key, {count + 1, sum + val, min(min, val), max(max, val)})
-    end
+  defp process_row(key, :undefined, val) do
+    :erlang.put(key, {1, val, val, val})
   end
 
-  defp char_to_num(c) do
-    c - ?0
+  defp process_row(key, {count, sum, min, max}, val) do
+    :erlang.put(key, {count + 1, sum + val, min(min, val), max(max, val)})
   end
 end
 
-defmodule OneBRC.MeasurementsProcessor.Version9 do
+defmodule OneBRC.MeasurementsProcessor.Version11 do
   @moduledoc """
-  diff from version 8:
-  1. Use String.to_atom for cities
+  diff from version 10:
+  1. reduce function heads
+  2. refactor processing
+
+  Performance: Processes 10 million rows in approx 300ms
   """
   import OneBRC.MeasurementsProcessor
-  alias OneBRC.MeasurementsProcessor.Version9.Worker
+  alias OneBRC.MeasurementsProcessor.Version11.Worker
 
   require Logger
 
@@ -122,33 +123,35 @@ defmodule OneBRC.MeasurementsProcessor.Version9 do
     t2 = System.monotonic_time(:millisecond)
 
     result =
-      results
-      |> List.flatten()
-      |> Enum.reduce(%{}, fn {key, {count_1, sum_1, min_1, max_1}}, acc ->
-        case Map.fetch(acc, key) do
-          :error ->
-            Map.put(acc, key, {count_1, sum_1, min_1, max_1})
+      for outer <- results, {key, {count_1, sum_1, min_1, max_1}} <- outer, reduce: %{} do
+        %{^key => {count_2, sum_2, min_2, max_2}} = acc ->
+          Map.put(acc, key, {
+            count_1 + count_2,
+            sum_1 + sum_2,
+            min(min_1, min_2),
+            max(max_1, max_2)
+          })
 
-          {:ok, {count_2, sum_2, min_2, max_2}} ->
-            Map.put(acc, key, {
-              count_1 + count_2,
-              sum_1 + sum_2,
-              min(min_1, min_2),
-              max(max_1, max_2)
-            })
-        end
-      end)
-      |> Enum.map(fn {key, {count, sum, min, max}} ->
-        {key, {min / 10.0, round_to_single_decimal(sum / count / 10.0), max / 10.0}}
-      end)
-      |> Enum.sort_by(fn {key, _} -> key end)
+        acc ->
+          Map.put(acc, key, {count_1, sum_1, min_1, max_1})
+      end
+      |> Enum.sort_by(fn {key, _} -> key end, :desc)
 
     t3 = System.monotonic_time(:millisecond)
 
     result_txt =
       result
-      |> Enum.reduce("", fn {key, {min, mean, max}}, acc ->
-        acc <> "#{key};#{min};#{mean};#{max}\n"
+      |> Enum.reduce([], fn {key, {count, sum, min, max}}, acc ->
+        [
+          Atom.to_string(key),
+          ?;,
+          Float.to_string(min / 10.0),
+          ?;,
+          Float.to_string(round_to_single_decimal(sum / count / 10.0)),
+          ?;,
+          Float.to_string(max / 10.0),
+          ?\n | acc
+        ]
       end)
 
     t4 = System.monotonic_time(:millisecond)

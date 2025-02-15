@@ -1,4 +1,9 @@
-defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
+defmodule OneBRC.MeasurementsProcessor.Version10.Worker do
+  @compile inline: [
+             parse_weather_station: 3,
+             parse_temp: 2,
+             process_row: 2
+           ]
   def run(parent_pid) do
     send(parent_pid, {:give_work, self()})
 
@@ -82,13 +87,13 @@ defmodule OneBRC.MeasurementsProcessor.Version9.Worker do
   end
 end
 
-defmodule OneBRC.MeasurementsProcessor.Version9 do
+defmodule OneBRC.MeasurementsProcessor.Version10 do
   @moduledoc """
-  diff from version 8:
-  1. Use String.to_atom for cities
+  diff from version 9:
+  1. Inline parsing functions
   """
   import OneBRC.MeasurementsProcessor
-  alias OneBRC.MeasurementsProcessor.Version9.Worker
+  alias OneBRC.MeasurementsProcessor.Version10.Worker
 
   require Logger
 
